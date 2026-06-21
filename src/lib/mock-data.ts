@@ -2,16 +2,18 @@ import type { Branch, Coupon, Member, MenuItem, Order } from "@/types/admin";
 
 export const orders: Order[] = [
   {
+    apiId: 1,
     id: "ORD-24061",
     customer: "林小姐",
     branch: "台北信義店",
     items: ["珍珠奶茶 L", "四季春青茶 M"],
     total: 135,
-    status: "new",
+    status: "pending",
     paidBy: "Line Pay",
     pickupTime: "10:35"
   },
   {
+    apiId: 2,
     id: "ORD-24060",
     customer: "王先生",
     branch: "台中公益店",
@@ -22,22 +24,24 @@ export const orders: Order[] = [
     pickupTime: "10:28"
   },
   {
+    apiId: 3,
     id: "ORD-24059",
     customer: "陳小姐",
     branch: "高雄巨蛋店",
     items: ["檸檬冬瓜 M", "黑糖鮮奶 L"],
     total: 150,
-    status: "ready",
+    status: "finished",
     paidBy: "Cash",
     pickupTime: "10:20"
   },
   {
+    apiId: 4,
     id: "ORD-24058",
     customer: "張先生",
     branch: "台北信義店",
     items: ["茉莉綠茶 M"],
     total: 40,
-    status: "completed",
+    status: "finished",
     paidBy: "Line Pay",
     pickupTime: "10:05"
   }

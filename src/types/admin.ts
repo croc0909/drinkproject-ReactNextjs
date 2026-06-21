@@ -1,6 +1,7 @@
-export type OrderStatus = "new" | "making" | "ready" | "completed" | "cancelled";
+export type OrderStatus = "pending" | "making" | "finished" | "canceled";
 
 export type Order = {
+  apiId: number;
   id: string;
   customer: string;
   branch: string;

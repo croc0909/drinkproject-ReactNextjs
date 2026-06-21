@@ -1,12 +1,25 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { branches, coupons, members, orders, salesByDay } from "@/lib/mock-data";
+import { branches, coupons, members, salesByDay } from "@/lib/mock-data";
 import { currency, number } from "@/lib/format";
 import { getDrinks } from "@/lib/drinks";
+import { getOrders, updateOrderStatus } from "@/lib/orders";
 import type { MenuItem, Order, OrderStatus } from "@/types/admin";
 
 type Section = "dashboard" | "orders" | "menu" | "branches" | "members" | "coupons" | "reports" | "settings";
+type AdminUser = {
+  id: number;
+  name: string;
+  email: string;
+  status: string;
+  roles: string[];
+};
+
+type LoginResponse = {
+  admin: AdminUser;
+  token: string;
+};
 
 const sections: { id: Section; label: string; icon: string }[] = [
   { id: "dashboard", label: "儀表板", icon: "D" },
@@ -20,12 +33,16 @@ const sections: { id: Section; label: string; icon: string }[] = [
 ];
 
 const statusLabels: Record<OrderStatus, string> = {
-  new: "新訂單",
+  pending: "新訂單",
   making: "製作中",
-  ready: "可取餐",
-  completed: "已完成",
-  cancelled: "已取消"
+  finished: "已完成",
+  canceled: "已取消"
 };
+
+const orderStatusOptions: OrderStatus[] = ["pending", "making", "finished", "canceled"];
+
+const adminSessionKey = "drink-admin-session";
+const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 
 export default function AdminDashboard() {
   const [activeSection, setActiveSection] = useState<Section>("dashboard");
@@ -34,24 +51,61 @@ export default function AdminDashboard() {
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [menuLoading, setMenuLoading] = useState(true);
   const [menuError, setMenuError] = useState("");
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(true);
+  const [ordersError, setOrdersError] = useState("");
+  const [updatingOrderId, setUpdatingOrderId] = useState<number | null>(null);
+  const [admin, setAdmin] = useState<AdminUser | null>(null);
+  const [adminToken, setAdminToken] = useState("");
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("andy@example.com");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState("");
+
+  useEffect(() => {
+    const storedSession = window.localStorage.getItem(adminSessionKey);
+    if (!storedSession) return;
+
+    try {
+      const session = JSON.parse(storedSession) as LoginResponse;
+      if (session.admin && session.token) {
+        setAdmin(session.admin);
+        setAdminToken(session.token);
+      }
+    } catch {
+      window.localStorage.removeItem(adminSessionKey);
+    }
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
 
-    async function loadDrinks() {
+    async function loadData() {
       try {
         setMenuLoading(true);
+        setOrdersLoading(true);
         setMenuError("");
-        setMenuItems(await getDrinks(controller.signal));
+        setOrdersError("");
+
+        const [drinks, latestOrders] = await Promise.all([
+          getDrinks(controller.signal),
+          getOrders(controller.signal)
+        ]);
+
+        setMenuItems(drinks);
+        setOrders(latestOrders);
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
         setMenuError("無法載入飲品資料，請確認 Go API 是否已啟動。");
+        setOrdersError("無法載入訂單資料，請確認 Go API 是否已啟動。");
       } finally {
         setMenuLoading(false);
+        setOrdersLoading(false);
       }
     }
 
-    loadDrinks();
+    loadData();
 
     return () => controller.abort();
   }, []);
@@ -62,12 +116,83 @@ export default function AdminDashboard() {
       const text = `${order.id} ${order.customer} ${order.branch} ${order.items.join(" ")}`.toLowerCase();
       return matchesStatus && text.includes(query.toLowerCase());
     });
-  }, [orderStatus, query]);
+  }, [orderStatus, orders, query]);
 
-  const totalRevenue = branches.reduce((sum, branch) => sum + branch.revenueToday, 0);
-  const totalOrders = branches.reduce((sum, branch) => sum + branch.ordersToday, 0);
+  const totalRevenue = orders.reduce((sum, order) => sum + order.total, 0);
+  const totalOrders = orders.length;
   const bestSeller = [...menuItems].sort((a, b) => b.soldToday - a.soldToday)[0];
   const maxRevenue = Math.max(...salesByDay.map((sale) => sale.revenue));
+  const canManageOrders = admin?.roles.includes("super_admin") ?? false;
+
+  async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoginLoading(true);
+    setLoginError("");
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/admin/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          email: loginEmail,
+          password: loginPassword
+        })
+      });
+
+      const contentType = response.headers.get("content-type") ?? "";
+      const data = contentType.includes("application/json") ? await response.json() : null;
+
+      if (!response.ok) {
+        throw new Error(data?.error ?? `登入 API 連線失敗（HTTP ${response.status}），請確認 Go 後端網址與路由。`);
+      }
+
+      if (!data) {
+        throw new Error("登入 API 沒有回傳 JSON，請確認 Go 後端回應格式。");
+      }
+
+      const session = data as LoginResponse;
+      setAdmin(session.admin);
+      setAdminToken(session.token);
+      window.localStorage.setItem(adminSessionKey, JSON.stringify(session));
+      setLoginOpen(false);
+      setLoginPassword("");
+      setActiveSection("orders");
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : "登入失敗，請稍後再試。");
+    } finally {
+      setLoginLoading(false);
+    }
+  }
+
+  function handleLogout() {
+    setAdmin(null);
+    setAdminToken("");
+    setLoginPassword("");
+    window.localStorage.removeItem(adminSessionKey);
+    setActiveSection("dashboard");
+  }
+
+  async function handleOrderStatusChange(order: Order, nextStatus: OrderStatus) {
+    if (order.status === nextStatus) return;
+
+    if (!adminToken) {
+      setOrdersError("請先登入管理員帳號。");
+      return;
+    }
+
+    setOrdersError("");
+    setUpdatingOrderId(order.apiId);
+    try {
+      const updatedOrder = await updateOrderStatus(order.apiId, nextStatus, adminToken);
+      setOrders((currentOrders) => currentOrders.map((item) => (item.apiId === updatedOrder.apiId ? updatedOrder : item)));
+    } catch (error) {
+      setOrdersError(error instanceof Error ? error.message : "更新訂單狀態失敗，請稍後再試。");
+    } finally {
+      setUpdatingOrderId(null);
+    }
+  }
 
   return (
     <main className="admin-shell">
@@ -95,9 +220,19 @@ export default function AdminDashboard() {
         </nav>
 
         <div className="operator-card">
-          <p className="eyebrow">今日值班</p>
-          <strong>Andy Admin</strong>
-          <span>總管理員</span>
+          <p className="eyebrow">{admin ? "目前登入" : "管理員功能"}</p>
+          <strong>{admin?.name ?? "尚未登入"}</strong>
+          <span>{admin ? admin.roles.join("、") : "登入後可管理訂單"}</span>
+          <button
+            className={admin ? "auth-button logout" : "auth-button"}
+            onClick={admin ? handleLogout : () => {
+              setLoginError("");
+              setLoginOpen(true);
+            }}
+            type="button"
+          >
+            {admin ? "登出" : "管理員登入"}
+          </button>
         </div>
       </aside>
 
@@ -108,6 +243,7 @@ export default function AdminDashboard() {
             <h2>{sections.find((section) => section.id === activeSection)?.label}</h2>
           </div>
           <div className="topbar-actions">
+            {admin && <span className="session-chip">已登入：{admin.email}</span>}
             <label className="search-box">
               <span>搜尋</span>
               <input
@@ -131,7 +267,10 @@ export default function AdminDashboard() {
 
             <section className="split-layout">
               <Panel title="即時訂單">
-                <OrderTable orders={filteredOrders.slice(0, 4)} compact />
+                {ordersLoading && <p className="empty-state">訂單資料載入中...</p>}
+                {!ordersLoading && ordersError && <p className="empty-state danger">{ordersError}</p>}
+                {!ordersLoading && !ordersError && filteredOrders.length === 0 && <p className="empty-state">目前沒有訂單。</p>}
+                {!ordersLoading && !ordersError && filteredOrders.length > 0 && <OrderTable orders={filteredOrders.slice(0, 4)} compact />}
               </Panel>
               <Panel title="本週營收">
                 <div className="bar-chart" aria-label="本週營收長條圖">
@@ -155,7 +294,17 @@ export default function AdminDashboard() {
 
         {activeSection === "orders" && (
           <Panel title="訂單列表" action={<StatusFilter value={orderStatus} onChange={setOrderStatus} />}>
-            <OrderTable orders={filteredOrders} />
+            {ordersLoading && <p className="empty-state">訂單資料載入中...</p>}
+            {!ordersLoading && ordersError && <p className="empty-state danger">{ordersError}</p>}
+            {!ordersLoading && !ordersError && filteredOrders.length === 0 && <p className="empty-state">目前沒有符合條件的訂單。</p>}
+            {!ordersLoading && !ordersError && filteredOrders.length > 0 && (
+              <OrderTable
+                canManageOrders={canManageOrders}
+                onStatusChange={handleOrderStatusChange}
+                orders={filteredOrders}
+                updatingOrderId={updatingOrderId}
+              />
+            )}
           </Panel>
         )}
 
@@ -236,7 +385,7 @@ export default function AdminDashboard() {
         {activeSection === "reports" && (
           <Panel title="銷售分析">
             <div className="report-grid">
-              <Metric title="平均客單價" value={currency(Math.round(totalRevenue / totalOrders))} trend="+3.6%" />
+              <Metric title="平均客單價" value={currency(totalOrders > 0 ? Math.round(totalRevenue / totalOrders) : 0)} trend="+3.6%" />
               <Metric title="本週營收" value={currency(salesByDay.reduce((sum, sale) => sum + sale.revenue, 0))} trend="+9.8%" />
               <Metric title="缺貨品項" value={`${menuItems.filter((item) => item.stock !== "normal").length}`} trend="需補貨" />
             </div>
@@ -266,6 +415,58 @@ export default function AdminDashboard() {
           </Panel>
         )}
       </section>
+
+      {loginOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="login-modal" role="dialog" aria-modal="true" aria-labelledby="admin-login-title">
+            <div className="login-modal-header">
+              <div>
+                <p className="eyebrow">Admin Login</p>
+                <h3 id="admin-login-title">管理員登入</h3>
+              </div>
+              <button
+                aria-label="關閉登入視窗"
+                className="icon-button"
+                onClick={() => setLoginOpen(false)}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+            <form className="login-form" onSubmit={handleLogin}>
+              <label>
+                <span>Email</span>
+                <input
+                  autoComplete="email"
+                  onChange={(event) => setLoginEmail(event.target.value)}
+                  required
+                  type="email"
+                  value={loginEmail}
+                />
+              </label>
+              <label>
+                <span>密碼</span>
+                <input
+                  autoComplete="current-password"
+                  onChange={(event) => setLoginPassword(event.target.value)}
+                  required
+                  type="password"
+                  value={loginPassword}
+                />
+              </label>
+              {loginError && <p className="form-error">{loginError}</p>}
+              <div className="login-actions">
+                <button className="secondary-button" onClick={() => setLoginOpen(false)} type="button">
+                  取消
+                </button>
+                <button className="primary-button" disabled={loginLoading} type="submit">
+                  {loginLoading ? "登入中..." : "登入"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -299,7 +500,7 @@ function StatusFilter({
   value: OrderStatus | "all";
   onChange: (value: OrderStatus | "all") => void;
 }) {
-  const options: (OrderStatus | "all")[] = ["all", "new", "making", "ready", "completed"];
+  const options: (OrderStatus | "all")[] = ["all", ...orderStatusOptions];
   return (
     <div className="segmented">
       {options.map((option) => (
@@ -316,7 +517,19 @@ function StatusFilter({
   );
 }
 
-function OrderTable({ orders: rows, compact = false }: { orders: Order[]; compact?: boolean }) {
+function OrderTable({
+  orders: rows,
+  compact = false,
+  canManageOrders = false,
+  onStatusChange,
+  updatingOrderId = null
+}: {
+  orders: Order[];
+  compact?: boolean;
+  canManageOrders?: boolean;
+  onStatusChange?: (order: Order, status: OrderStatus) => void;
+  updatingOrderId?: number | null;
+}) {
   return (
     <table className={`table ${compact ? "compact" : ""}`}>
       <thead>
@@ -327,6 +540,7 @@ function OrderTable({ orders: rows, compact = false }: { orders: Order[]; compac
           <th>狀態</th>
           {!compact && <th>付款</th>}
           <th>金額</th>
+          {!compact && <th>狀態操作</th>}
         </tr>
       </thead>
       <tbody>
@@ -338,6 +552,26 @@ function OrderTable({ orders: rows, compact = false }: { orders: Order[]; compac
             <td><span className={`chip ${order.status}`}>{statusLabels[order.status]}</span></td>
             {!compact && <td>{order.paidBy}</td>}
             <td>{currency(order.total)}</td>
+            {!compact && (
+              <td>
+                {canManageOrders ? (
+                  <select
+                    className="status-select"
+                    disabled={updatingOrderId === order.apiId}
+                    onChange={(event) => onStatusChange?.(order, event.target.value as OrderStatus)}
+                    value={order.status}
+                  >
+                    {orderStatusOptions.map((status) => (
+                      <option key={status} value={status}>
+                        {statusLabels[status]}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="muted-text">僅最高管理員</span>
+                )}
+              </td>
+            )}
           </tr>
         ))}
       </tbody>
